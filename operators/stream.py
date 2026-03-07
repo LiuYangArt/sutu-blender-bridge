@@ -14,7 +14,15 @@ except Exception:  # pragma: no cover - Blender runtime dependency
 
 from ..bridge.client import get_addon_preferences, get_bridge_client
 from ..bridge.frame_sender import get_frame_sender, shutdown_frame_sender
+from ..bridge.png_codec import encode_rgba_png
 from ..bridge.messages import BRIDGE_TRANSPORT_SHM
+from ..bridge.websocket_server import (
+    TRANSPORT_MODE_AUTO,
+    TRANSPORT_MODE_NATIVE,
+    TRANSPORT_MODE_WEBSOCKET,
+    get_websocket_bridge_server,
+    normalize_transport_mode,
+)
 
 STATE_POLL_INTERVAL_SEC = 0.1
 SETTLE_DELAY_SEC = 0.35
@@ -39,6 +47,49 @@ _WAITING_HINT_LOGGED = False
 _RENDER_SEND_PENDING = False
 _RENDER_SEND_EVENT = None
 _DRAW_VIEW3D_OVERLAY_KW_SUPPORTED = None
+_LIVE_STREAM_ACTIVE = False
+
+
+def _selected_transport_mode(context: bpy.types.Context | None = None) -> str:
+    prefs = get_addon_preferences(context)
+    if prefs is None:
+        return TRANSPORT_MODE_AUTO
+    return normalize_transport_mode(getattr(prefs, "transport_mode", TRANSPORT_MODE_AUTO))
+
+
+def _active_transport_mode(context: bpy.types.Context | None = None) -> str:
+    mode = _selected_transport_mode(context)
+    if mode == TRANSPORT_MODE_NATIVE:
+        return TRANSPORT_MODE_NATIVE
+    if mode == TRANSPORT_MODE_WEBSOCKET:
+        return TRANSPORT_MODE_WEBSOCKET
+
+    websocket_status = get_websocket_bridge_server().get_status()
+    if websocket_status.get("state") == "streaming":
+        return TRANSPORT_MODE_WEBSOCKET
+
+    native_status = get_bridge_client().get_status()
+    if native_status.get("state") == "streaming":
+        return TRANSPORT_MODE_NATIVE
+
+    if websocket_status.get("enabled"):
+        return TRANSPORT_MODE_WEBSOCKET
+    return TRANSPORT_MODE_NATIVE
+
+
+def _active_runtime_status(context: bpy.types.Context | None = None):
+    if _active_transport_mode(context) == TRANSPORT_MODE_WEBSOCKET:
+        return get_websocket_bridge_server().get_status()
+    return get_bridge_client().get_status()
+
+
+def is_live_stream_active() -> bool:
+    return _LIVE_STREAM_ACTIVE
+
+
+def _set_live_stream_active(active: bool) -> None:
+    global _LIVE_STREAM_ACTIVE
+    _LIVE_STREAM_ACTIVE = bool(active)
 
 
 def _show_bridge_popup(message: str, icon: str = "INFO") -> None:
@@ -184,8 +235,7 @@ def _request_capture_now() -> None:
 
 
 def _on_depsgraph_update(scene, depsgraph) -> None:
-    sender = get_frame_sender()
-    if not sender.is_streaming:
+    if not is_live_stream_active():
         return
     if len(getattr(depsgraph, "updates", [])) == 0:
         return
@@ -198,6 +248,8 @@ def _get_stream_target_hint() -> tuple[int | None, int | None]:
 
 
 def _ensure_stream_target_hint_ready() -> bool:
+    if _active_transport_mode() == TRANSPORT_MODE_WEBSOCKET:
+        return True
     global _WAITING_HINT_LOGGED
     hint_width, hint_height = _get_stream_target_hint()
     if hint_width is not None and hint_height is not None:
@@ -212,11 +264,10 @@ def _ensure_stream_target_hint_ready() -> bool:
 def _stream_state_timer():
     global _LAST_VIEW_SIGNATURE
 
-    sender = get_frame_sender()
-    if not sender.is_streaming:
+    if not is_live_stream_active():
         return None
 
-    status = get_bridge_client().get_status()
+    status = _active_runtime_status()
     if status.get("state") != "streaming":
         return STATE_POLL_INTERVAL_SEC
 
@@ -247,11 +298,10 @@ def _stream_state_timer():
 def _capture_draw_callback():
     global _LAST_CAPTURE_AT, _PENDING_CAPTURE
 
-    sender = get_frame_sender()
-    if not sender.is_streaming:
+    if not is_live_stream_active():
         return
 
-    status = get_bridge_client().get_status()
+    status = _active_runtime_status()
     if status.get("state") != "streaming":
         return
 
@@ -279,7 +329,7 @@ def _capture_draw_callback():
         if pixels is None:
             return
         width, height, pixels = _downscale_for_stream(width, height, pixels)
-        sender.send_rgba_frame(width=width, height=height, pixels=pixels)
+        _send_rgba_frame_to_active_transport(width=width, height=height, pixels=pixels)
         _LAST_CAPTURE_AT = time.monotonic()
         _PENDING_CAPTURE = False
     except Exception as exc:
@@ -745,6 +795,14 @@ def _capture_render_result_via_temp_file(image) -> tuple[int, int, bytes] | None
 
 
 def _send_single_frame_to_bridge(width: int, height: int, pixels: bytes, stop_reason: str) -> Optional[int]:
+    if _active_transport_mode() == TRANSPORT_MODE_WEBSOCKET:
+        png_bytes = encode_rgba_png(width, height, pixels)
+        return get_websocket_bridge_server().send_png_frame(
+            width=width,
+            height=height,
+            png_bytes=png_bytes,
+        )
+
     sender = get_frame_sender()
     sender.start_stream(stream_id=None)
     try:
@@ -762,6 +820,19 @@ def _send_single_frame_to_bridge(width: int, height: int, pixels: bytes, stop_re
     else:
         sender.stop_stream(reason=stop_reason)
     return frame_id
+
+
+def _send_rgba_frame_to_active_transport(width: int, height: int, pixels: bytes) -> Optional[int]:
+    if _active_transport_mode() == TRANSPORT_MODE_WEBSOCKET:
+        png_bytes = encode_rgba_png(width, height, pixels)
+        return get_websocket_bridge_server().send_png_frame(
+            width=width,
+            height=height,
+            png_bytes=png_bytes,
+        )
+
+    sender = get_frame_sender()
+    return sender.send_rgba_frame(width=width, height=height, pixels=pixels)
 
 
 def _defer_one_shot_stream_stop(reason: str, delay_sec: float) -> None:
@@ -938,6 +1009,7 @@ def _remove_stream_hooks() -> None:
 
 
 def _reset_stream_state() -> None:
+    _set_live_stream_active(False)
     global _LAST_CAPTURE_AT
     global _LAST_DIRTY_AT
     global _PENDING_CAPTURE
@@ -967,15 +1039,16 @@ class SUTU_OT_bridge_start_stream(bpy.types.Operator):
     bl_description = "Start streaming Blender viewport frames"
 
     def execute(self, context: bpy.types.Context):
-        client = get_bridge_client()
-        status = client.get_status()
+        status = _active_runtime_status(context)
         if status.get("state") != "streaming":
             self.report({"ERROR"}, _("Please connect Sutu Bridge first"))
             return {"CANCELLED"}
 
-        sender = get_frame_sender()
-        sender.start_stream(stream_id=None)
+        if _active_transport_mode(context) == TRANSPORT_MODE_NATIVE:
+            sender = get_frame_sender()
+            sender.start_stream(stream_id=None)
         _reset_stream_state()
+        _set_live_stream_active(True)
         _ensure_stream_hooks()
         _request_capture_now()
         self.report({"INFO"}, _("Stream started"))
@@ -1002,8 +1075,7 @@ class SUTU_OT_bridge_send_current_frame(bpy.types.Operator):
     bl_description = "Send the current viewport frame to Sutu (live stream stops first)"
 
     def execute(self, context: bpy.types.Context):
-        client = get_bridge_client()
-        status = client.get_status()
+        status = _active_runtime_status(context)
         if status.get("state") != "streaming":
             self.report({"ERROR"}, _("Please connect Sutu Bridge first"))
             return {"CANCELLED"}
@@ -1036,8 +1108,7 @@ class SUTU_OT_bridge_send_render_result(bpy.types.Operator):
     bl_description = "Send Render Result (optionally re-render first; live stream stops first)"
 
     def execute(self, context: bpy.types.Context):
-        client = get_bridge_client()
-        status = client.get_status()
+        status = _active_runtime_status(context)
         if status.get("state") != "streaming":
             self.report({"ERROR"}, _("Please connect Sutu Bridge first"))
             return {"CANCELLED"}

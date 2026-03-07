@@ -8,7 +8,40 @@ from ..bridge.client import (
     get_addon_preferences,
     get_bridge_client,
 )
-from ..bridge.frame_sender import get_frame_sender
+from ..bridge.websocket_server import (
+    DEFAULT_WEBSOCKET_PORT,
+    TRANSPORT_MODE_AUTO,
+    TRANSPORT_MODE_NATIVE,
+    TRANSPORT_MODE_WEBSOCKET,
+    get_websocket_bridge_server,
+    normalize_transport_mode,
+)
+from ..operators.stream import is_live_stream_active
+
+
+def _resolve_selected_transport_mode(context: Optional[bpy.types.Context]) -> str:
+    prefs = get_addon_preferences(context)
+    if prefs is None:
+        return TRANSPORT_MODE_AUTO
+    return normalize_transport_mode(getattr(prefs, "transport_mode", TRANSPORT_MODE_AUTO))
+
+
+def _resolve_panel_status(context: Optional[bpy.types.Context]):
+    mode = _resolve_selected_transport_mode(context)
+    websocket_status = get_websocket_bridge_server().get_status()
+    native_status = get_bridge_client().get_status()
+
+    if mode == TRANSPORT_MODE_NATIVE:
+        return native_status
+    if mode == TRANSPORT_MODE_WEBSOCKET:
+        return websocket_status
+    if websocket_status.get("state") == "streaming":
+        return websocket_status
+    if native_status.get("state") == "streaming":
+        return native_status
+    if websocket_status.get("enabled"):
+        return websocket_status
+    return native_status
 
 
 def _apply_bridge_preferences(context: Optional[bpy.types.Context]) -> None:
@@ -17,16 +50,37 @@ def _apply_bridge_preferences(context: Optional[bpy.types.Context]) -> None:
         return
 
     client = get_bridge_client()
-    # Preserve current runtime toggle; default to disabled when status is unavailable.
-    enabled = bool(client.get_status().get("enabled", False))
-    ok = client.configure(
-        port=int(getattr(prefs, "port", 30121)),
-        enable_connection=enabled,
-    )
-    if not ok:
-        if enabled:
+    websocket_server = get_websocket_bridge_server()
+    mode = _resolve_selected_transport_mode(context)
+
+    native_enabled = bool(client.get_status().get("enabled", False))
+    websocket_enabled = bool(websocket_server.get_status().get("enabled", False))
+
+    if mode in {TRANSPORT_MODE_NATIVE, TRANSPORT_MODE_AUTO}:
+        ok = client.configure(
+            port=int(getattr(prefs, "port", 30121)),
+            enable_connection=native_enabled,
+        )
+        if not ok and native_enabled:
             client.disable_connection()
-        return
+    else:
+        client.disable_connection()
+
+    if mode in {TRANSPORT_MODE_WEBSOCKET, TRANSPORT_MODE_AUTO}:
+        ok = websocket_server.configure(
+            port=int(getattr(prefs, "websocket_port", DEFAULT_WEBSOCKET_PORT)),
+            enable_server=websocket_enabled,
+        )
+        if not ok and websocket_enabled:
+            websocket_server.configure(
+                port=int(getattr(prefs, "websocket_port", DEFAULT_WEBSOCKET_PORT)),
+                enable_server=False,
+            )
+    else:
+        websocket_server.configure(
+            port=int(getattr(prefs, "websocket_port", DEFAULT_WEBSOCKET_PORT)),
+            enable_server=False,
+        )
 
 
 def _on_bridge_config_updated(self, context: Optional[bpy.types.Context]) -> None:
@@ -73,6 +127,27 @@ class SUTUBridgeAddonPreferences(bpy.types.AddonPreferences):
         update=_on_bridge_config_updated,
     )
 
+    transport_mode: bpy.props.EnumProperty(  # type: ignore
+        name="Transport Mode",
+        description="Choose which transport runtime should be exposed to Sutu",
+        items=[
+            (TRANSPORT_MODE_AUTO, "Auto", "Enable both runtimes and use whichever peer becomes active"),
+            (TRANSPORT_MODE_NATIVE, "Native", "Use the existing desktop bridge runtime"),
+            (TRANSPORT_MODE_WEBSOCKET, "WebSocket", "Expose a local WebSocket server for Sutu Web"),
+        ],
+        default=TRANSPORT_MODE_AUTO,
+        update=_on_bridge_config_updated,
+    )
+
+    websocket_port: bpy.props.IntProperty(  # type: ignore
+        name="WebSocket Port",
+        description="Local WebSocket server port for Sutu Web",
+        default=DEFAULT_WEBSOCKET_PORT,
+        min=1024,
+        max=65535,
+        update=_on_bridge_config_updated,
+    )
+
     send_render_use_existing_result: bpy.props.BoolProperty(  # type: ignore
         name="Use Existing Render Result",
         description="When enabled, Send Render skips re-rendering and sends the current Render Result",
@@ -108,7 +183,9 @@ class SUTUBridgeAddonPreferences(bpy.types.AddonPreferences):
 
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
+        layout.prop(self, "transport_mode")
         layout.prop(self, "port")
+        layout.prop(self, "websocket_port")
         _draw_debug_options(layout, self)
 
 
@@ -128,7 +205,7 @@ class SUTU_PT_bridge_panel(bpy.types.Panel):
 
         layout.prop(prefs, "send_render_use_existing_result")
 
-        status = get_bridge_client().get_status()
+        status = _resolve_panel_status(context)
         state_text = _localize_status_state(status.get("state", "unknown"))
         status_row = layout.column(align=True)
         status_row.label(text=f"{_('State')}: {state_text}")
@@ -148,9 +225,8 @@ class SUTU_PT_bridge_panel(bpy.types.Panel):
         else:
             row.operator("sutu_bridge.connect_toggle", text=_("Connect"), icon="LINKED")
 
-        sender = get_frame_sender()
         row = layout.row(align=True)
-        if sender.is_streaming:
+        if is_live_stream_active():
             row.operator("sutu_bridge.stop_stream", text=_("Stop Stream"), icon="PAUSE")
         else:
             row.operator("sutu_bridge.start_stream", text=_("Start Stream"), icon="PLAY")
