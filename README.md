@@ -6,7 +6,7 @@
 
 - 目标：把 Blender 当前视口或 Render Result 发送到 Sutu
 - Blender 版本：5.0+
-- 运行方式：插件通过 localhost TCP 与 Sutu 通信
+- 运行方式：插件支持 `Native / WebSocket / Auto` 三种本地传输模式
 
 ## 安装方式
 
@@ -26,13 +26,18 @@
 
 ### 1. 连接 Sutu
 
-1. 先启动 Sutu
+1. 先启动 Sutu Desktop 或 Sutu Web
 2. Blender 侧栏打开 `Sutu Bridge`
-3. 点击 `Connect` 建立连接
+3. 在插件设置中选择传输模式：
+   - `Native`：连接桌面版 Sutu
+   - `WebSocket`：连接网页端 Sutu
+   - `Auto`：同时暴露两条链路，按活跃对端自动选择
+4. 点击 `Connect` 建立连接
 
 说明：
 - 插件现在默认不会在 Blender 启动时自动连接
 - 每次重启 Blender 后都需要手动点击 `Connect`
+- `WebSocket` 模式默认监听 `ws://127.0.0.1:30122`
 
 ### 2. 实时推流视口
 
@@ -55,6 +60,15 @@
 - `Dump Frame Files`：导出采集帧与传输字节，便于排查问题
 - `Dump Max Frames`：每次推流会话最多导出的帧数
 - `Dump Directory`：调试文件输出目录
+
+### 5. 与 Sutu Web 配合使用
+
+1. 打开 Sutu Web 设置页中的 `Blender Bridge`
+2. 将 `WebSocket URL` 设为 `ws://127.0.0.1:30122`
+3. 打开 `Enable Connection`
+4. 回到 Blender，把传输模式设为 `WebSocket` 或 `Auto`
+5. 点击 `Connect`
+6. 使用 `Send Viewport` 或 `Start Stream`
 
 ## 常见状态
 
