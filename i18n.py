@@ -15,6 +15,8 @@ def _build_zh_hans_map() -> dict[tuple[str, str], str]:
         "Use the existing desktop bridge runtime": "使用现有桌面桥接运行时",
         "WebSocket": "WebSocket",
         "Expose a local WebSocket server for Sutu Web": "为速涂网页端暴露本地 WebSocket 服务",
+        "Web Blender Bridge is temporarily disabled.": "网页版 Blender Bridge 已临时禁用。",
+        "Use Sutu Desktop with Native mode.": "请切换到 Native 模式，并使用速涂桌面版。",
         "WebSocket Port": "WebSocket 端口",
         "Local WebSocket server port for Sutu Web": "供速涂网页端连接的本地 WebSocket 服务端口",
         "Sutu Bridge listening port": "速涂桥接监听端口",

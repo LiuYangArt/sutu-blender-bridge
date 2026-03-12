@@ -10,8 +10,23 @@ from ..bridge.websocket_server import (
     TRANSPORT_MODE_NATIVE,
     TRANSPORT_MODE_WEBSOCKET,
     get_websocket_bridge_server,
+    is_web_bridge_temporarily_disabled,
     normalize_transport_mode,
 )
+
+
+def _resolve_websocket_port(prefs) -> int:
+    if prefs is None:
+        return DEFAULT_WEBSOCKET_PORT
+    return int(getattr(prefs, "websocket_port", DEFAULT_WEBSOCKET_PORT))
+
+
+def _disable_bridge_connections(client, websocket_server, prefs) -> None:
+    client.disable_connection()
+    websocket_server.configure(
+        port=_resolve_websocket_port(prefs),
+        enable_server=False,
+    )
 
 
 class SUTU_OT_bridge_connect_toggle(bpy.types.Operator):
@@ -28,20 +43,17 @@ class SUTU_OT_bridge_connect_toggle(bpy.types.Operator):
         native_enabled = bool(client.get_status().get("enabled", False))
         websocket_enabled = bool(websocket_server.get_status().get("enabled", False))
         if native_enabled or websocket_enabled:
-            client.disable_connection()
-            websocket_server.configure(
-                port=int(getattr(prefs, "websocket_port", DEFAULT_WEBSOCKET_PORT)) if prefs else DEFAULT_WEBSOCKET_PORT,
-                enable_server=False,
-            )
+            _disable_bridge_connections(client, websocket_server, prefs)
             self.report({"INFO"}, _("Sutu Bridge disconnected"))
             return {"FINISHED"}
 
+        if is_web_bridge_temporarily_disabled(mode):
+            _disable_bridge_connections(client, websocket_server, prefs)
+            self.report({"ERROR"}, _("Web Blender Bridge is temporarily disabled."))
+            return {"CANCELLED"}
+
         port = int(getattr(prefs, "port", 30121)) if prefs is not None else 30121
-        websocket_port = (
-            int(getattr(prefs, "websocket_port", DEFAULT_WEBSOCKET_PORT))
-            if prefs is not None
-            else DEFAULT_WEBSOCKET_PORT
-        )
+        websocket_port = _resolve_websocket_port(prefs)
 
         ok_native = True
         ok_websocket = True

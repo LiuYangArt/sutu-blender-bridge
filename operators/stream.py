@@ -21,6 +21,7 @@ from ..bridge.websocket_server import (
     TRANSPORT_MODE_NATIVE,
     TRANSPORT_MODE_WEBSOCKET,
     get_websocket_bridge_server,
+    is_web_bridge_temporarily_disabled,
     normalize_transport_mode,
 )
 
@@ -53,8 +54,19 @@ _LIVE_STREAM_ACTIVE = False
 def _selected_transport_mode(context: bpy.types.Context | None = None) -> str:
     prefs = get_addon_preferences(context)
     if prefs is None:
-        return TRANSPORT_MODE_AUTO
+        return TRANSPORT_MODE_NATIVE
     return normalize_transport_mode(getattr(prefs, "transport_mode", TRANSPORT_MODE_AUTO))
+
+
+def _cancel_if_web_bridge_temporarily_disabled(
+    operator: bpy.types.Operator,
+    context: bpy.types.Context | None = None,
+) -> bool:
+    mode = _selected_transport_mode(context)
+    if not is_web_bridge_temporarily_disabled(mode):
+        return False
+    operator.report({"ERROR"}, _("Web Blender Bridge is temporarily disabled."))
+    return True
 
 
 def _active_transport_mode(context: bpy.types.Context | None = None) -> str:
@@ -1039,6 +1051,8 @@ class SUTU_OT_bridge_start_stream(bpy.types.Operator):
     bl_description = "Start streaming Blender viewport frames"
 
     def execute(self, context: bpy.types.Context):
+        if _cancel_if_web_bridge_temporarily_disabled(self, context):
+            return {"CANCELLED"}
         status = _active_runtime_status(context)
         if status.get("state") != "streaming":
             self.report({"ERROR"}, _("Please connect Sutu Bridge first"))
@@ -1075,6 +1089,8 @@ class SUTU_OT_bridge_send_current_frame(bpy.types.Operator):
     bl_description = "Send the current viewport frame to Sutu (live stream stops first)"
 
     def execute(self, context: bpy.types.Context):
+        if _cancel_if_web_bridge_temporarily_disabled(self, context):
+            return {"CANCELLED"}
         status = _active_runtime_status(context)
         if status.get("state") != "streaming":
             self.report({"ERROR"}, _("Please connect Sutu Bridge first"))
@@ -1108,6 +1124,8 @@ class SUTU_OT_bridge_send_render_result(bpy.types.Operator):
     bl_description = "Send Render Result (optionally re-render first; live stream stops first)"
 
     def execute(self, context: bpy.types.Context):
+        if _cancel_if_web_bridge_temporarily_disabled(self, context):
+            return {"CANCELLED"}
         status = _active_runtime_status(context)
         if status.get("state") != "streaming":
             self.report({"ERROR"}, _("Please connect Sutu Bridge first"))

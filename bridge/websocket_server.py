@@ -17,6 +17,7 @@ WEBSOCKET_TRANSPORT = "websocket"
 TRANSPORT_MODE_AUTO = "auto"
 TRANSPORT_MODE_NATIVE = "native"
 TRANSPORT_MODE_WEBSOCKET = "websocket"
+WEB_BRIDGE_DISABLED_MODES = frozenset({TRANSPORT_MODE_AUTO, TRANSPORT_MODE_WEBSOCKET})
 
 
 def normalize_transport_mode(value: Any) -> str:
@@ -24,6 +25,10 @@ def normalize_transport_mode(value: Any) -> str:
     if normalized in {TRANSPORT_MODE_AUTO, TRANSPORT_MODE_NATIVE, TRANSPORT_MODE_WEBSOCKET}:
         return normalized
     return TRANSPORT_MODE_AUTO
+
+
+def is_web_bridge_temporarily_disabled(mode: Any) -> bool:
+    return normalize_transport_mode(mode) in WEB_BRIDGE_DISABLED_MODES
 
 
 class WebSocketBridgeServer:
